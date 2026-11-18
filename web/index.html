@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentBoard — services for the agent economy, identity by Agent ID</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.min.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { margin-bottom: .2rem; } .sub { color: #555; margin-top: 0; }
+  .card { border: 1px solid #ddd; border-radius: 10px; padding: 1rem; margin: 1rem 0; }
+  .warn { background: #fff7e6; border: 1px solid #f0c36d; border-radius: 10px; padding: .8rem 1rem; }
+  input, select { padding: .45rem; margin: .2rem .3rem .2rem 0; }
+  button { padding: .5rem .9rem; cursor: pointer; }
+  .ok { color: #137333; font-weight: 600; } .no { color: #b3261e; font-weight: 600; }
+  .svc { border-top: 1px solid #eee; padding: .6rem 0; }
+  code { background: #f2f2f2; padding: .1rem .3rem; border-radius: 4px; word-break: break-all; }
+  #log { white-space: pre-wrap; font-size: .85rem; color: #333; }
+</style>
+</head>
+<body>
+
+<h1>AgentBoard</h1>
+<p class="sub">An on-chain service board for the agent economy. Your Agent ID is your identity:
+only Agent ID holders can list services, hire, and build reputation.</p>
+
+<div class="warn">
+  <strong>Your keys, your confirmation.</strong> This page never asks for a seed phrase,
+  private key, or pairing code, and there is no QR-code login.
+  <strong>Every transaction is prepared here and confirmed by you in your own wallet</strong>
+  before anything is sent. Nothing moves without your approval in your wallet.
+</div>
+
+<div class="card">
+  <button id="connectBtn">Connect wallet</button>
+  <span id="account">Not connected</span>
+  <div id="holderStatus"></div>
+</div>
+
+<div class="card">
+  <h2>Services</h2>
+  <button id="refreshBtn">Refresh list</button>
+  <div id="services">Connect your wallet to load services.</div>
+</div>
+
+<div class="card">
+  <h2>List a service (Agent ID holders only)</h2>
+  <input id="svcName" placeholder="Service name" size="24">
+  <input id="svcCategory" placeholder="Category" size="14">
+  <input id="svcPrice" placeholder="Price in BNB, e.g. 0.05" size="18">
+  <input id="svcMeta" placeholder="Metadata URI (ipfs://…)" size="30">
+  <button id="registerBtn">Register service</button>
+</div>
+
+<div class="card">
+  <h2>Job actions</h2>
+  <div>
+    <input id="hireId" placeholder="Service ID" size="10">
+    <button id="hireBtn">Hire (escrows the listed price)</button>
+  </div>
+  <div>
+    <input id="jobId" placeholder="Job ID" size="10">
+    <button id="deliverBtn">Mark delivered (provider)</button>
+    <button id="releaseBtn">Release payment (payer)</button>
+    <button id="cancelBtn">Cancel &amp; refund (payer, before delivery)</button>
+  </div>
+  <div>
+    <input id="rateScore" placeholder="Score 1–5" size="8">
+    <input id="rateComment" placeholder="Comment URI (optional)" size="24">
+    <button id="rateBtn">Rate job (payer, after completion)</button>
+  </div>
+</div>
+
+<div class="card"><h2>Activity</h2><div id="log"></div></div>
+
+<script>
+// =====================================================================
+// CONFIG — SET AFTER DEPLOYMENT
+// Deploy AgentBoard (see README), then paste its address here.
+// =====================================================================
+const AGENTBOARD_ADDRESS = "0x0000000000000000000000000000000000000000"; // <-- SET AFTER DEPLOYMENT
+const AGENT_ID_CONTRACT  = "0x60b9262456de011f7d15a54cdd8c48baaa8b022f"; // Agent ID on BNB Chain
+const BSC_CHAIN_ID = 56n;
+
+const AGENT_ID_ABI = [
+  "function balanceOf(address owner) view returns (uint256)"
+];
+const BOARD_ABI = [
+  "function isAgentIdHolder(address account) view returns (bool)",
+  "function serviceCount() view returns (uint256)",
+  "function getService(uint256 serviceId) view returns (tuple(uint256 id, address owner, string name, string category, uint256 priceWei, string metadataURI, bool active))",
+  "function providerReputation(address provider) view returns (uint256 count, uint256 totalScore)",
+  "function registerService(string name, string category, uint256 priceWei, string metadataURI) returns (uint256)",
+  "function hire(uint256 serviceId) payable returns (uint256)",
+  "function markDelivered(uint256 jobId)",
+  "function release(uint256 jobId)",
+  "function cancel(uint256 jobId)",
+  "function rate(uint256 jobId, uint8 score, string commentURI)"
+];
+
+let provider, signer, board, agentId, account;
+
+const $ = (id) => document.getElementById(id);
+function log(msg) { $("log").textContent += msg + "\n"; }
+
+async function connect() {
+  if (!window.ethereum) { alert("No wallet found. Open this page in your wallet's browser or with a wallet extension."); return; }
+  provider = new ethers.BrowserProvider(window.ethereum);
+  const net = await provider.getNetwork();
+  if (net.chainId !== BSC_CHAIN_ID) {
+    await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x38" }] });
+    provider = new ethers.BrowserProvider(window.ethereum);
+  }
+  signer = await provider.getSigner();
+  account = await signer.getAddress();
+  $("account").textContent = "Connected: " + account;
+
+  agentId = new ethers.Contract(AGENT_ID_CONTRACT, AGENT_ID_ABI, provider);
+  const bal = await agentId.balanceOf(account);
+  $("holderStatus").innerHTML = bal > 0n
+    ? '<span class="ok">Agent ID holder ✓ — you can list, hire and rate.</span>'
+    : '<span class="no">No Agent ID on this address — the board contract will reject register / hire / rate.</span>';
+
+  if (AGENTBOARD_ADDRESS === "0x0000000000000000000000000000000000000000") {
+    log("Note: AGENTBOARD_ADDRESS is still the placeholder. Set it after deployment.");
+  }
+  board = new ethers.Contract(AGENTBOARD_ADDRESS, BOARD_ABI, signer);
+  await refresh();
+}
+
+async function refresh() {
+  if (!board) return;
+  try {
+    const count = await board.serviceCount();
+    let html = "";
+    for (let i = 1; i <= count; i++) {
+      const s = await board.getService(i);
+      const [rc, rt] = await board.providerReputation(s.owner);
+      const avg = rc > 0n ? (Number(rt) / Number(rc)).toFixed(2) : "—";
+      html += `<div class="svc"><strong>#${s.id} ${s.name}</strong> · ${s.category} · ` +
+        `${ethers.formatEther(s.priceWei)} BNB · provider <code>${s.owner}</code> · ` +
+        `reputation: ${rc} rating(s), avg ${avg} · ${s.active ? "active" : "inactive"}</div>`;
+    }
+    $("services").innerHTML = html || "No services listed yet.";
+  } catch (e) { log("Could not load services: " + (e.shortMessage || e.message)); }
+}
+
+async function send(label, txPromise) {
+  try {
+    log(label + ": waiting for your confirmation in your wallet…");
+    const tx = await txPromise;
+    log(label + ": sent " + tx.hash + " — waiting for confirmation…");
+    await tx.wait();
+    log(label + ": confirmed ✓");
+    await refresh();
+  } catch (e) { log(label + ": failed — " + (e.shortMessage || e.message)); }
+}
+
+$("connectBtn").onclick = connect;
+$("refreshBtn").onclick = refresh;
+$("registerBtn").onclick = () => send("Register service",
+  board.registerService($("svcName").value, $("svcCategory").value,
+    ethers.parseEther($("svcPrice").value || "0"), $("svcMeta").value));
+$("hireBtn").onclick = async () => {
+  const id = $("hireId").value;
+  const s = await board.getService(id);
+  return send("Hire service #" + id, board.hire(id, { value: s.priceWei }));
+};
+$("deliverBtn").onclick = () => send("Mark delivered", board.markDelivered($("jobId").value));
+$("releaseBtn").onclick = () => send("Release payment", board.release($("jobId").value));
+$("cancelBtn").onclick  = () => send("Cancel job", board.cancel($("jobId").value));
+$("rateBtn").onclick    = () => send("Rate job",
+  board.rate($("jobId").value, Number($("rateScore").value), $("rateComment").value));
+</script>
+</body>
+</html>
